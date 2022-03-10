@@ -28,9 +28,8 @@ public:
         : begin_(begin)
         , end_(end)
     {}   
-    // 问题一：怎么设计run函数的返回值，可以表示任意的类型
-    // Java Python   Object 是所有其它类类型的基类
-    // C++17 Any类型  为啥不用模板，因为模板函数和虚函数是不能写在一块的
+    // 怎么设计run函数的返回值，可以表示任意的类型
+    // 这里仿照C++17 Any类型实现  为啥不用模板，因为模板函数和虚函数是不能写在一块的
     Any run()  // run方法最终就在线程池分配的线程中去做执行了!
     {
         std::cout << "tid:" << std::this_thread::get_id()
@@ -72,7 +71,7 @@ int main()
     cout << "main over!" << endl;
     getchar();
 #if 0
-    // 问题：ThreadPool对象析构以后，怎么样把线程池相关的线程资源全部回收？
+    // ThreadPool对象析构以后，怎么样把线程池相关的线程资源全部回收？
     {
         ThreadPool pool;
         // 用户自己设置线程池的工作模式
@@ -80,7 +79,7 @@ int main()
         // 开始启动线程池
         pool.start(4);
 
-        // 问题二 ：如何设计这里的Result机制呢
+        // 设计Result使得其能获取各线程任意未来类型的运算结果
         Result res1 = pool.submitTask(std::make_shared<MyTask>(1, 100000000));
         Result res2 = pool.submitTask(std::make_shared<MyTask>(100000001, 200000000));
         Result res3 = pool.submitTask(std::make_shared<MyTask>(200000001, 300000000));
@@ -90,7 +89,7 @@ int main()
         pool.submitTask(std::make_shared<MyTask>(200000001, 300000000));
 
         // 随着task被执行完，task对象没了，依赖于task对象的Result对象也没了
-        uLong sum1 = res1.get().cast_<uLong>();  // get返回了一个Any类型，怎么转成具体的类型呢？
+        uLong sum1 = res1.get().cast_<uLong>();  // get返回了一个Any类型，需要转成具体类型
         uLong sum2 = res2.get().cast_<uLong>();
         uLong sum3 = res3.get().cast_<uLong>();
 
