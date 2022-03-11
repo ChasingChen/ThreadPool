@@ -1,123 +1,94 @@
-﻿// 线程池项目.cpp : 此文件包含 "main" 函数。程序执行将在此处开始并结束。
+﻿// 线程池项目-最终版.cpp : 此文件包含 "main" 函数。程序执行将在此处开始并结束。
 //
 
 #include <iostream>
-#include <chrono>
+#include <functional>
 #include <thread>
+#include <future>
+#include <chrono>
 using namespace std;
 
-#include "threadpool_1.0.h"
+#include "threadpool.h"
+
 
 /*
-有些场景，是希望能够获取线程执行任务得返回值得
-举例：
-1 + 。。。 + 30000的和
-thread1  1 + ... + 10000
-thread2  10001 + ... + 20000
-.....
+如何能让线程池提交任务更加方便
+1. pool.submitTask(sum1, 10, 20);
+   pool.submitTask(sum2, 1 ,2, 3);
+   submitTask:可变参模板编程
 
-main thread：给每一个线程分配计算的区间，并等待他们算完返回结果，合并最终的结果即可
+2. 我们自己造了一个Result以及相关的类型，代码挺多
+    C++11 线程库   thread   packaged_task(function函数对象)  async 
+   使用future来代替Result节省线程池代码
 */
 
-using uLong = unsigned long long;
+int sum1(int a, int b)
+{
+    this_thread::sleep_for(chrono::seconds(2));
+    // 比较耗时
+    return a + b;
+}
+int sum2(int a, int b, int c)
+{
+    this_thread::sleep_for(chrono::seconds(2));
+    return a + b + c;
+}
+// io线程 
+void io_thread(int listenfd)
+{
 
-class MyTask : public Task
-{ 
-public:
-    MyTask(int begin, int end)
-        : begin_(begin)
-        , end_(end)
-    {}   
-    // 怎么设计run函数的返回值，可以表示任意的类型
-    // 这里仿照C++17 Any类型实现  为啥不用模板，因为模板函数和虚函数是不能写在一块的
-    Any run()  // run方法最终就在线程池分配的线程中去做执行了!
-    {
-        std::cout << "tid:" << std::this_thread::get_id()
-            << "begin!" << std::endl;
-        std::this_thread::sleep_for(std::chrono::seconds(3));
-        uLong sum = 0;
-        for (uLong i = begin_; i <= end_; i++)
-            sum += i;
-        std::cout << "tid:" << std::this_thread::get_id()
-            << "end!" << std::endl;
+}
+// worker线程
+void worker_thread(int clientfd)
+{
 
-        return sum;
-    }
-
-private:
-    int begin_;
-    int end_;
-};
-
+}
 int main()
 {
-    {   //括一个作用域 ThreadPool pool会自动回收
-        ThreadPool pool;
-        pool.setMode(PoolMode::MODE_CACHED);
-        // 开始启动线程池
-        pool.start(2);
+    ThreadPool pool;
+    // pool.setMode(PoolMode::MODE_CACHED);
+    pool.start(2);
 
-        // linux上，这些Result对象也是局部对象，要析构的！！！
-        Result res1 = pool.submitTask(std::make_shared<MyTask>(1, 100000000));
-        Result res2 = pool.submitTask(std::make_shared<MyTask>(100000001, 200000000));
-        pool.submitTask(std::make_shared<MyTask>(100000001, 200000000));
-        pool.submitTask(std::make_shared<MyTask>(100000001, 200000000));
-        pool.submitTask(std::make_shared<MyTask>(100000001, 200000000));
+    future<int> r1 = pool.submitTask(sum1, 1, 2);
+    future<int> r2 = pool.submitTask(sum2, 1, 2, 3);
+    future<int> r3 = pool.submitTask([](int b, int e)->int {
+        int sum = 0;
+        for (int i = b; i <= e; i++)
+            sum += i;
+        return sum;
+        }, 1, 100);
+    future<int> r4 = pool.submitTask([](int b, int e)->int {
+        int sum = 0;
+        for (int i = b; i <= e; i++)
+            sum += i;
+        return sum;
+        }, 1, 100);
+    future<int> r5 = pool.submitTask([](int b, int e)->int {
+        int sum = 0;
+        for (int i = b; i <= e; i++)
+            sum += i;
+        return sum;
+        }, 1, 100);
+    //future<int> r4 = pool.submitTask(sum1, 1, 2);
 
-        //uLong sum1 = res1.get().cast_<uLong>();
-        //cout << sum1 << endl; 
-    } // 这里Result对象也要析构!!! 在vs下，条件变量析构会释放相应资源的
-    
-    cout << "main over!" << endl;
-    getchar();
-#if 0
-    // ThreadPool对象析构以后，怎么样把线程池相关的线程资源全部回收？
-    {
-        ThreadPool pool;
-        // 用户自己设置线程池的工作模式
-        pool.setMode(PoolMode::MODE_CACHED);
-        // 开始启动线程池
-        pool.start(4);
+    cout << r1.get() << endl;
+    cout << r2.get() << endl;
+    cout << r3.get() << endl;
+    cout << r4.get() << endl;
+    cout << r5.get() << endl;
 
-        // 设计Result使得其能获取各线程任意未来类型的运算结果
-        Result res1 = pool.submitTask(std::make_shared<MyTask>(1, 100000000));
-        Result res2 = pool.submitTask(std::make_shared<MyTask>(100000001, 200000000));
-        Result res3 = pool.submitTask(std::make_shared<MyTask>(200000001, 300000000));
-        pool.submitTask(std::make_shared<MyTask>(200000001, 300000000));
+    //packaged_task<int(int, int)> task(sum1);
+    //// future <=> Result
+    //future<int> res = task.get_future();
+    //// task(10, 20);
+    //thread t(std::move(task), 10, 20);
+    //t.detach();
 
-        pool.submitTask(std::make_shared<MyTask>(200000001, 300000000));
-        pool.submitTask(std::make_shared<MyTask>(200000001, 300000000));
+    //cout << res.get() << endl;
 
-        // 随着task被执行完，task对象没了，依赖于task对象的Result对象也没了
-        uLong sum1 = res1.get().cast_<uLong>();  // get返回了一个Any类型，需要转成具体类型
-        uLong sum2 = res2.get().cast_<uLong>();
-        uLong sum3 = res3.get().cast_<uLong>();
+    /*thread t1(sum1, 10, 20);
+    thread t2(sum2, 1, 2, 3);
 
-        // Master - Slave线程模型
-        // Master线程用来分解任务，然后给各个Slave线程分配任务
-        // 等待各个Slave线程执行完任务，返回结果
-        // Master线程合并各个任务结果，输出
-        cout << (sum1 + sum2 + sum3) << endl;
-    }
-    
-
-
-    /*uLong sum = 0;
-    for (uLong i = 1; i <= 300000000; i++)
-        sum += i;
-    cout << sum << endl;*/
-
-    /*pool.submitTask(std::make_shared<MyTask>());
-    pool.submitTask(std::make_shared<MyTask>());
-    pool.submitTask(std::make_shared<MyTask>());
-    pool.submitTask(std::make_shared<MyTask>());
-    pool.submitTask(std::make_shared<MyTask>());
-    pool.submitTask(std::make_shared<MyTask>());
-    pool.submitTask(std::make_shared<MyTask>());
-    pool.submitTask(std::make_shared<MyTask>());
-    pool.submitTask(std::make_shared<MyTask>());*/
- 
-    getchar();
-
-#endif
+    t1.join();
+    t2.join();*/
 }

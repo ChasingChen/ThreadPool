@@ -1,7 +1,7 @@
- #ifndef THREADPOOL_H
+#ifndef THREADPOOL_H
 #define THREADPOOL_H
-//命名规范：变量用驼峰式，下滑线放后面（因为C++库里很多都是把下滑线放前面的）
-//函数首字母大写
+
+#include <iostream>
 #include <vector>
 #include <queue>
 #include <memory>
@@ -11,142 +11,15 @@
 #include <functional>
 #include <unordered_map>
 #include <thread>
+#include <future>
 
-// Any类型：可以接收任意数据的类型
-class Any    //模板的代码都写在一个文件中
-{
-public:
-	Any() = default;
-	~Any() = default;
-	Any(const Any&) = delete;
-	Any& operator=(const Any&) = delete;   //为啥要=delete,unique_ptr和auto_ptr不同之处在于，unique_ptr永远只有一个智能指针指向资源，它把左值引用拷贝构造赋值给禁用掉了，公布了右值引用拷贝构造
-	Any(Any&&) = default;
-	Any& operator=(Any&&) = default;
+const int TASK_MAX_THRESHHOLD = 2; // INT32_MAX;
+const int THREAD_MAX_THRESHHOLD = 1024;
+const int THREAD_MAX_IDLE_TIME = 60; // 单位：秒
 
-	// 这个构造函数可以让Any类型接收任意其它的数据
-	template<typename T>  // T:int    Derive<int>
-	Any(T data) : base_(std::make_unique<Derive<T>>(data))
-	{}
-
-	// 这个方法能把Any对象里面存储的data数据提取出来
-	template<typename T>
-	T cast_()
-	{
-		// 我们怎么从base_找到它所指向的Derive对象，从它里面取出data成员变量
-		// 基类指针 =》 派生类指针   RTTI（Run-Time Type Identification):四种强转只有dynamic_cast通过运行时类型信息程序能够使用基类的指针或引用来检查这些指针或引用所指的对象的实际派生类型
-		Derive<T>* pd = dynamic_cast<Derive<T>*>(base_.get());  //智能指针get()获取裸指针
-		if (pd == nullptr)   //避免Any构造时是用int实例化对象，基类指针指向Derive<int>,而强转试图转为long就要提示不成功
-		{
-			throw "type is unmatch!";
-		}
-		return pd->data_;  //把派生类的成员变量返回
-	}
-private:
-	// 基类类型
-	class Base
-	{
-	public:
-		virtual ~Base() = default;  //可以让编译器优化，{}=default用默认实现 
-	};
-
-	// 派生类类型
-	template<typename T>
-	class Derive : public Base
-	{
-	public:
-		Derive(T data) : data_(data) 
-		{}
-		T data_;  // 保存了任意的其它类型
-	};
-
-private:
-	// 定义一个基类的指针
-	std::unique_ptr<Base> base_;
-};
-
-// 实现一个信号量类
-class Semaphore
-{
-public:
-	Semaphore(int limit = 0) 
-		:resLimit_(limit)
-		,isExit_(false);
-	{}
-	~Semaphore() 
-	{
-		isExit_=true;	
-	}
-
-	// 获取一个信号量资源
-	void wait()
-	{
-		if(isExit_)
-		return;
-		std::unique_lock<std::mutex> lock(mtx_);
-		// 等待信号量有资源，没有资源的话，会阻塞当前线程
-		cond_.wait(lock, [&]()->bool {return resLimit_ > 0; });
-		resLimit_--;
-	}
-
-	// 增加一个信号量资源
-	void post()
-	{
-		if(isExit_)
-		return;
-		std::unique_lock<std::mutex> lock(mtx_);
-		resLimit_++;
-		// linux下condition_variable的析构函数什么也没做
-		// 导致这里状态已经失效，无故阻塞
-		cond_.notify_all();  // 等待状态，释放mutex锁 通知条件变量wait的地方，可以起来干活了
-	}
-private:
-	 std::atomic_bool isExit_;
-	int resLimit_;
-	std::mutex mtx_;
-	std::condition_variable cond_;
-};
-
-// Task类型的前置声明
-class Task;
-
-// 实现接收提交到线程池的task任务执行完成后的返回值类型Result
-class Result
-{
-public:
-	Result(std::shared_ptr<Task> task, bool isValid = true);
-
-	~Result() = default;
-
-	// 问题一：setVal方法，获取任务执行完的返回值存放到any_里，通过信号量通知get()
-	void setVal(Any any);
-
-	// 问题二：get方法，用户调用这个方法获取task的返回值，通过信号量来阻塞
-	Any get();
-private:
-	Any any_; // 存储任务的返回值
-	Semaphore sem_; // 线程通信信号量,因为获取结果和任务执行是两个线程，如果任务执行未完成，则get()需要阻塞，因此需要线程通信
-	std::shared_ptr<Task> task_; //指向对应获取返回值的任务对象，这样就不会在get()之前在另一个线程析构掉 
-	std::atomic_bool isValid_; // 返回值是否有效，任务提交给线程池失败则get()不阻塞
-};
-
-// 任务抽象基类
-class Task
-{
-public:
-	Task();
-	~Task() = default;
-	void exec();
-	void setResult(Result* res);//初始化result_
-
-	// 用户可以自定义任意任务类型，从Task继承，重写run方法，实现自定义任务处理
-	virtual Any run() = 0;
-
-private:
-	Result* result_; // Result对象的生命周期 》 Task的  用裸指针就可以了，不要用智能指针，否则会出现强智能指针的交叉引用问题，因为Result里放一个指向Task的智能指针，Task里放一个指向Result的强智能指针，否则Result和Task对象出了作用域也得不到释放，造成内存泄漏
-};
 
 // 线程池支持的模式
-enum class PoolMode   //C++专门加了一个class，访问枚举项时加上枚举类型可避免不同枚举类型有相同的枚举项
+enum class PoolMode
 {
 	MODE_FIXED,  // 固定数量的线程
 	MODE_CACHED, // 线程数量可动态增长
@@ -156,93 +29,303 @@ enum class PoolMode   //C++专门加了一个class，访问枚举项时加上枚举类型可避免不同
 class Thread
 {
 public:
-	// 线程函数对象类型，using的另一用法
-	using ThreadFunc = std::function<void(int)>;   
+	// 线程函数对象类型
+	using ThreadFunc = std::function<void(int)>;
 
 	// 线程构造
-	Thread(ThreadFunc func);
+	Thread(ThreadFunc func)
+		: func_(func)
+		, threadId_(generateId_++)
+	{}
 	// 线程析构
-	~Thread();
+	~Thread() = default;
+
 	// 启动线程
-	void start();
+	void start()
+	{
+		// 创建一个线程来执行一个线程函数 pthread_create
+		std::thread t(func_, threadId_);  // C++11来说 线程对象t  和线程函数func_
+		t.detach(); // 设置分离线程   pthread_detach  pthread_t设置成分离线程
+	}
 
 	// 获取线程id
-	int getId()const;
-private:     
+	int getId()const
+	{
+		return threadId_;
+	}
+private:
 	ThreadFunc func_;
 	static int generateId_;
 	int threadId_;  // 保存线程id
 };
 
-/*api：
-example:
-ThreadPool pool;
-pool.start(4);
+int Thread::generateId_ = 0;
 
-class MyTask : public Task
-{
-	public:
-		void run() { // 线程代码... }
-};
-
-pool.submitTask(std::make_shared<MyTask>());             
-*/
 // 线程池类型
-class  ThreadPool
+class ThreadPool
 {
 public:
 	// 线程池构造
-	ThreadPool();
+	ThreadPool()
+		: initThreadSize_(0)
+		, taskSize_(0)
+		, idleThreadSize_(0)
+		, curThreadSize_(0)
+		, taskQueMaxThreshHold_(TASK_MAX_THRESHHOLD)
+		, threadSizeThreshHold_(THREAD_MAX_THRESHHOLD)
+		, poolMode_(PoolMode::MODE_FIXED)
+		, isPoolRunning_(false)
+	{}
 
 	// 线程池析构
-	~ThreadPool();
+	~ThreadPool()
+	{
+		isPoolRunning_ = false;
+
+		// 等待线程池里面所有的线程返回  有两种状态：阻塞 & 正在执行任务中
+		std::unique_lock<std::mutex> lock(taskQueMtx_);
+		notEmpty_.notify_all();
+		exitCond_.wait(lock, [&]()->bool {return threads_.size() == 0; });
+	}
 
 	// 设置线程池的工作模式
-	void setMode(PoolMode mode);
+	void setMode(PoolMode mode)
+	{
+		if (checkRunningState())
+			return;
+		poolMode_ = mode;
+	}
 
 	// 设置task任务队列上线阈值
-	void setTaskQueMaxThreshHold(int threshhold);
+	void setTaskQueMaxThreshHold(int threshhold)
+	{
+		if (checkRunningState())
+			return;
+		taskQueMaxThreshHold_ = threshhold;
+	}
 
 	// 设置线程池cached模式下线程阈值
-	void setThreadSizeThreshHold(int threshhold);
+	void setThreadSizeThreshHold(int threshhold)
+	{
+		if (checkRunningState())
+			return;
+		if (poolMode_ == PoolMode::MODE_CACHED)
+		{
+			threadSizeThreshHold_ = threshhold;
+		}
+	}
 
 	// 给线程池提交任务
-	Result submitTask(std::shared_ptr<Task> sp); 
+	// 使用可变参模板编程，让submitTask可以接收任意任务函数和任意数量的参数
+	// pool.submitTask(sum1, 10, 20);  
+	// 返回值future<>
+	template<typename Func, typename... Args>
+	auto submitTask(Func&& func, Args&&... args) -> std::future<decltype(func(args...))>   //这句的意思是函数的返回值需要future<>,而future是一个模板需要有类型实例化，因此需要用decltype做表达式推导
+	{
+		// 打包任务，放入任务队列里面
+		using RType = decltype(func(args...));     //函数的返回值类型
+		auto task = std::make_shared<std::packaged_task<RType()>>(       //用packageed_task把任务打包一下，task不能创建为局部的，否则提交完就没了，得用智能指针，此处智能指针返回值为RType，无参数传入是因为绑定了
+		std::bind(std::forward<Func>(func), std::forward<Args>(args)...));  //可以不传参，将参数绑定上函数对象，因此得到了一个不代参数的函数对象，右值引用传入要用forward保持完美转发
+		std::future<RType> result = task->get_future();    //get_future()是packaged_task的成员函数
+
+		// 获取锁
+		std::unique_lock<std::mutex> lock(taskQueMtx_);
+		// 用户提交任务，最长不能阻塞超过1s，否则判断提交任务失败，返回
+		if (!notFull_.wait_for(lock, std::chrono::seconds(1),     
+			[&]()->bool { return taskQue_.size() < (size_t)taskQueMaxThreshHold_; }))
+		{
+			// 表示notFull_等待1s种，条件依然没有满足
+			std::cerr << "task queue is full, submit task fail." << std::endl;
+			auto task = std::make_shared<std::packaged_task<RType()>>(
+				[]()->RType { return RType(); });    //失败的话返回“零值”   没有必要throw异常，可以类似linux一样要查errno，用{ return -5678; });返回错误码
+			(*task)();    //让任务执行，否则在main函数里future.get()将会阻塞,task解引用得到package_task类型的函数对象
+			return task->get_future();
+		}
+
+		// 如果有空余，把任务放入任务队列中
+		// taskQue_.emplace(sp);      
+		// using Task = std::function<void()>;         //当前任务队列中的任务类型，该怎么放进任务队列里呢，有中间层的情况下，因为任务队列里接收的是Task类型（无返回值）的，而task是是有返回值RType()的
+		taskQue_.emplace([task]() {(*task)();});     //用lambda函数创建一个无返回值(无->)的函数对象破解中间层问题,lambda里先给智能指针task解引用得到package_task类型的函数对象，这里需要用task按值捕获一下
+		taskSize_++;
+
+		// 因为新放了任务，任务队列肯定不空了，在notEmpty_上进行通知，赶快分配线程执行任务
+		notEmpty_.notify_all();
+
+		// cached模式 任务处理比较紧急 场景：小而快的任务 需要根据任务数量和空闲线程的数量，判断是否需要创建新的线程出来
+		if (poolMode_ == PoolMode::MODE_CACHED
+			&& taskSize_ > idleThreadSize_
+			&& curThreadSize_ < threadSizeThreshHold_)
+		{
+			std::cout << ">>> create new thread..." << std::endl;
+
+			// 创建新的线程对象
+			auto ptr = std::make_unique<Thread>(std::bind(&ThreadPool::threadFunc, this, std::placeholders::_1));
+			int threadId = ptr->getId();
+			threads_.emplace(threadId, std::move(ptr));
+			// 启动线程
+			threads_[threadId]->start();
+			// 修改线程个数相关的变量
+			curThreadSize_++;
+			idleThreadSize_++;
+		}
+
+		// 返回任务的Result对象
+		return result;
+	}
 
 	// 开启线程池
-	void start(int initThreadSize = std::thread::hardware_concurrency());    //默认为cpu核心数量
+	void start(int initThreadSize = std::thread::hardware_concurrency())
+	{
+		// 设置线程池的运行状态
+		isPoolRunning_ = true;
 
-    //禁止用户对线程池本身进行拷贝和赋值，因为设计到容器、锁、条件变量等
+		// 记录初始线程个数
+		initThreadSize_ = initThreadSize;
+		curThreadSize_ = initThreadSize;
+
+		// 创建线程对象
+		for (int i = 0; i < initThreadSize_; i++)
+		{
+			// 创建thread线程对象的时候，把线程函数给到thread线程对象
+			auto ptr = std::make_unique<Thread>(std::bind(&ThreadPool::threadFunc, this, std::placeholders::_1));
+			int threadId = ptr->getId();
+			threads_.emplace(threadId, std::move(ptr));
+			// threads_.emplace_back(std::move(ptr));
+		}
+
+		// 启动所有线程  std::vector<Thread*> threads_;
+		for (int i = 0; i < initThreadSize_; i++)
+		{
+			threads_[i]->start(); // 需要去执行一个线程函数
+			idleThreadSize_++;    // 记录初始空闲线程的数量
+		}
+	}
+
 	ThreadPool(const ThreadPool&) = delete;
 	ThreadPool& operator=(const ThreadPool&) = delete;
 
 private:
-	// 定义线程函数。线程函数去任务队列里去抢任务来执行，因为其访问的任务队列的变量都在ThreadPool里，因此不定义在Thread里
-	void threadFunc(int threadid);
+	// 定义线程函数
+	void threadFunc(int threadid)
+	{
+		auto lastTime = std::chrono::high_resolution_clock().now();
+
+		// 所有任务必须执行完成，线程池才可以回收所有线程资源
+		for (;;)
+		{
+			Task task;              //此处由智能指针改成了函数对象
+			{
+				// 先获取锁
+				std::unique_lock<std::mutex> lock(taskQueMtx_);
+
+				std::cout << "tid:" << std::this_thread::get_id()
+					<< "尝试获取任务..." << std::endl;
+
+				// cached模式下，有可能已经创建了很多的线程，但是空闲时间超过60s，应该把多余的线程
+				// 结束回收掉（超过initThreadSize_数量的线程要进行回收）
+				// 当前时间 - 上一次线程执行的时间 > 60s
+
+				// 每一秒中返回一次   怎么区分：超时返回？还是有任务待执行返回
+				// 锁 + 双重判断
+				while (taskQue_.size() == 0)
+				{
+					// 线程池要结束，回收线程资源
+					if (!isPoolRunning_)
+					{
+						threads_.erase(threadid); // std::this_thread::getid()
+						std::cout << "threadid:" << std::this_thread::get_id() << " exit!"
+							<< std::endl;
+						exitCond_.notify_all();
+						return; // 线程函数结束，线程结束
+					}
+
+					if (poolMode_ == PoolMode::MODE_CACHED)
+					{
+						// 条件变量，超时返回了
+						if (std::cv_status::timeout ==
+							notEmpty_.wait_for(lock, std::chrono::seconds(1)))
+						{
+							auto now = std::chrono::high_resolution_clock().now();
+							auto dur = std::chrono::duration_cast<std::chrono::seconds>(now - lastTime);
+							if (dur.count() >= THREAD_MAX_IDLE_TIME
+								&& curThreadSize_ > initThreadSize_)
+							{
+								// 开始回收当前线程
+								// 记录线程数量的相关变量的值修改
+								// 把线程对象从线程列表容器中删除   没有办法 threadFunc《=》thread对象
+								// threadid => thread对象 => 删除
+								threads_.erase(threadid); // std::this_thread::getid()
+								curThreadSize_--;
+								idleThreadSize_--;
+
+								std::cout << "threadid:" << std::this_thread::get_id() << " exit!"
+									<< std::endl;
+								return;
+							}
+						}
+					}
+					else
+					{
+						// 等待notEmpty条件
+						notEmpty_.wait(lock);
+					}
+				}
+
+				idleThreadSize_--;
+
+				std::cout << "tid:" << std::this_thread::get_id()
+					<< "获取任务成功..." << std::endl;
+
+				// 从任务队列种取一个任务出来
+				task = taskQue_.front();
+				taskQue_.pop();
+				taskSize_--;
+
+				// 如果依然有剩余任务，继续通知其它得线程执行任务
+				if (taskQue_.size() > 0)
+				{
+					notEmpty_.notify_all();
+				}
+
+				// 取出一个任务，进行通知，通知可以继续提交生产任务
+				notFull_.notify_all();
+			} // 就应该把锁释放掉
+
+			// 当前线程负责执行这个任务
+			if (task != nullptr)
+			{
+				task(); // 执行function<void()> 
+			}
+
+			idleThreadSize_++;
+			lastTime = std::chrono::high_resolution_clock().now(); // 更新线程执行完任务的时间
+		}
+	}
 
 	// 检查pool的运行状态
-	bool checkRunningState() const;
+	bool checkRunningState() const
+	{
+		return isPoolRunning_;
+	}
 
 private:
-	// std::vector<std::unique_ptr<Thread>> threads_; // 线程列表为啥不用
-	std::unordered_map<int, std::unique_ptr<Thread>> threads_; // 线程列表,注意插入时的右值引用传递
+	std::unordered_map<int, std::unique_ptr<Thread>> threads_; // 线程列表
 
 	int initThreadSize_;  // 初始的线程数量
-	int threadSizeThreshHold_; // 线程数量上限阈值（cached模式使用）
-	std::atomic_int curThreadSize_;	// 记录当前线程池里面线程的总数量，为啥不直接用vector.size()呢？因为vector不是线程安全的
+	int threadSizeThreshHold_; // 线程数量上限阈值
+	std::atomic_int curThreadSize_;	// 记录当前线程池里面线程的总数量
 	std::atomic_int idleThreadSize_; // 记录空闲线程的数量
 
-	std::queue<std::shared_ptr<Task>> taskQue_; // 任务队列，为啥需要智能指针？因为防止用户传入的是一个短生命周期的对象，以及自动释放资源  
-	std::atomic_int taskSize_; // 任务的数量   为啥不直接从taskQue_中获取大小，二要额外定义一个CAS呢
-	int taskQueMaxThreshHold_;  // 任务队列数量上限阈值，每个任务都是要栈内存的，因此不能过多。
-
-	std::mutex taskQueMtx_; // 保证任务队列的线程安全
+	// Task任务 =》 函数对象
+	using Task = std::function<void()>;  //因为不确定所有任务的返回值是啥，故设定为void()，用作中间程
+	std::queue<Task> taskQue_; // 任务队列：从queue<std::shared_ptr<Task>> taskQue_改为用Task函数对象。因为Task是线程池内部封装的，不用担心生命周期问题。之前是用户自己创建和传入的，不知道其是全局的还是局部的，故哟用智能指针保证生命周期
+	std::atomic_int tas 
 	std::condition_variable notFull_; // 表示任务队列不满
-	std::condition_variable  notEmpty_; // 表示任务队列不空   生产者消费者模型为啥要用到两个条件变量呢？为了控制能更精细一点，见正式版284行：如果任务队列还有东西先唤醒其它线程
+	std::condition_variable notEmpty_; // 表示任务队列不空
 	std::condition_variable exitCond_; // 等到线程资源全部回收
 
 	PoolMode poolMode_; // 当前线程池的工作模式
-	std::atomic_bool isPoolRunning_; // 表示当前线程池的启动状态，防止用户调用start后再改变模式
+	std::atomic_bool isPoolRunning_; // 表示当前线程池的启动状态
 };
 
 #endif
